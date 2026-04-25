@@ -1,4 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { api, isoDate, type SpecialDay, type TraceEvent } from './lib/api'
+import DayDetail from './DayDetail'
 import './Calendar.css'
 
 const WEEKDAYS = ['일', '월', '화', '수', '목', '금', '토']
@@ -15,13 +17,61 @@ function isSameDay(a: Date, b: Date) {
   )
 }
 
-function Calendar() {
-  const today = new Date()
+interface Props {
+  onDataChanged?: () => void
+}
+
+function Calendar({ onDataChanged }: Props) {
+  const today = useMemo(() => new Date(), [])
   const [view, setView] = useState(new Date(today.getFullYear(), today.getMonth(), 1))
   const [selected, setSelected] = useState<Date | null>(null)
+  const [events, setEvents] = useState<TraceEvent[]>([])
+  const [specials, setSpecials] = useState<SpecialDay[]>([])
+  const [reloadKey, setReloadKey] = useState(0)
 
   const year = view.getFullYear()
   const month = view.getMonth()
+
+  useEffect(() => {
+    const firstIso = isoDate(new Date(year, month, 1))
+    const lastIso = isoDate(new Date(year, month + 1, 0))
+    let cancelled = false
+    Promise.all([
+      api.events.range(firstIso, lastIso),
+      api.specialDays.month(year, month + 1),
+    ])
+      .then(([evs, sps]) => {
+        if (cancelled) return
+        setEvents(evs)
+        setSpecials(sps)
+      })
+      .catch((err) => console.error('calendar load failed', err))
+    return () => {
+      cancelled = true
+    }
+  }, [year, month, reloadKey])
+
+  const eventsByDate = useMemo(() => {
+    const map = new Map<string, TraceEvent[]>()
+    for (const ev of events) {
+      const list = map.get(ev.date) ?? []
+      list.push(ev)
+      map.set(ev.date, list)
+    }
+    return map
+  }, [events])
+
+  const specialsByDate = useMemo(() => {
+    const map = new Map<string, SpecialDay[]>()
+    for (const s of specials) {
+      const date = s.date ?? `${year}-${s.monthDay}`
+      const list = map.get(date) ?? []
+      list.push(s)
+      map.set(date, list)
+    }
+    return map
+  }, [specials, year])
+
   const firstWeekday = new Date(year, month, 1).getDay()
   const daysInMonth = new Date(year, month + 1, 0).getDate()
   const daysInPrevMonth = new Date(year, month, 0).getDate()
@@ -43,7 +93,15 @@ function Calendar() {
 
   const goPrev = () => setView(new Date(year, month - 1, 1))
   const goNext = () => setView(new Date(year, month + 1, 1))
-  const goToday = () => setView(new Date(today.getFullYear(), today.getMonth(), 1))
+  const goToday = () => {
+    setView(new Date(today.getFullYear(), today.getMonth(), 1))
+    setSelected(today)
+  }
+
+  const handleChanged = () => {
+    setReloadKey((k) => k + 1)
+    onDataChanged?.()
+  }
 
   return (
     <div className="calendar">
@@ -69,28 +127,46 @@ function Calendar() {
         ))}
         {cells.map(({ date, inMonth }) => {
           const dow = date.getDay()
+          const iso = isoDate(date)
+          const dayEvents = eventsByDate.get(iso) ?? []
+          const daySpecials = specialsByDate.get(iso) ?? []
+          const isHoliday = daySpecials.some((s) => s.kind === 'holiday')
           const classes = ['cal-day']
           if (!inMonth) classes.push('out')
           if (isSameDay(date, today)) classes.push('today')
           if (selected && isSameDay(date, selected)) classes.push('selected')
-          if (dow === 0) classes.push('sun')
-          if (dow === 6) classes.push('sat')
+          if (dow === 0 || isHoliday) classes.push('sun')
+          else if (dow === 6) classes.push('sat')
           return (
             <button
-              key={date.toISOString()}
+              key={iso}
               type="button"
               className={classes.join(' ')}
               onClick={() => setSelected(date)}
+              title={daySpecials.map((s) => s.name).join(', ')}
             >
-              {date.getDate()}
+              <span className="cal-day-num">{date.getDate()}</span>
+              {daySpecials.length > 0 && (
+                <span className="cal-day-special">{daySpecials[0].name}</span>
+              )}
+              {dayEvents.length > 0 && (
+                <span className="cal-day-dots" aria-label={`일정 ${dayEvents.length}개`}>
+                  {dayEvents.slice(0, 3).map((ev) => (
+                    <span key={ev.id} className={`dot dot-${ev.color}`} />
+                  ))}
+                  {dayEvents.length > 3 && <span className="dot-more">+{dayEvents.length - 3}</span>}
+                </span>
+              )}
             </button>
           )
         })}
       </div>
       {selected && (
-        <p className="cal-selected-info">
-          선택: {selected.getFullYear()}년 {MONTHS[selected.getMonth()]} {selected.getDate()}일
-        </p>
+        <DayDetail
+          date={selected}
+          onClose={() => setSelected(null)}
+          onChanged={handleChanged}
+        />
       )}
     </div>
   )
